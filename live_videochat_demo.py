@@ -12,6 +12,37 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 
 
+def _disable_flash_attention_imports() -> None:
+    """Stub flash-attn modules so unguarded imports do not crash.
+
+    We provide empty module stubs for common flash-attn import paths. This lets
+    libraries that do bare imports continue, while we steer attention to SDPA.
+    """
+    import types
+
+    def _ensure_module(name: str) -> None:
+        if name not in sys.modules:
+            sys.modules[name] = types.ModuleType(name)
+
+    # Base modules
+    for mod in [
+        "flash_attn",
+        "flash_attn_2",
+        "flash_attn_interface",
+    ]:
+        _ensure_module(mod)
+
+    # Common submodules referenced by various repos
+    for sub in [
+        "flash_attn.bert_padding",
+        "flash_attn.ops",
+        "flash_attn.layers",
+        "flash_attn.modules",
+        "flash_attn.flash_attn_interface",
+    ]:
+        _ensure_module(sub)
+
+
 def select_best_dtype() -> torch.dtype:
     if torch.cuda.is_available():
         try:
@@ -146,6 +177,9 @@ def _set_torch_sdp_policy(attn: str) -> None:
 
 def load_model_and_tokenizer(model_path: str, dtype: torch.dtype, device: str, attn: str):
     print(f"[{human_time()}] Loading model: {model_path}", flush=True)
+    # If not explicitly using flash2, proactively disable flash-attn imports
+    if os.environ.get("FORCE_ENABLE_FLASH_ATTN", "0") != "1" and attn != "flash2":
+        _disable_flash_attention_imports()
     _set_torch_sdp_policy(attn)
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
@@ -165,6 +199,28 @@ def load_model_and_tokenizer(model_path: str, dtype: torch.dtype, device: str, a
             model.config.attn_implementation = attn_impl
         except Exception:
             pass
+    except Exception as exc:
+        # If anything complains about flash-attn while not using flash2, force-disable and retry once
+        msg = str(exc).lower()
+        if attn != "flash2" and any(t in msg for t in [
+            "flash_attn",
+            "flash-attn",
+            "flash attention",
+            "flashattention",
+            "attn2",
+        ]):
+            print(f"[{human_time()}] Detected flash-attn related error; disabling and retrying with SDPA…", flush=True)
+            _disable_flash_attention_imports()
+            try:
+                model = AutoModel.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                    attn_implementation="sdpa",
+                )
+            except Exception:
+                raise
+        else:
+            raise
 
     model = model.to(dtype).to(device).eval()
     return model, tokenizer
