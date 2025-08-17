@@ -1,41 +1,55 @@
-# NanoLLM
+### Live VideoChat-Flash Demo (Jetson Orin Nano)
 
-Live video chat demos for MacBook Air (MPS) and Jetson Orin Nano (CUDA) using VideoChat-Flash and Qwen2.5-VL models.
+This demo captures 10 FPS from `/dev/video0`, groups 100 frames into a short temporary video, and queries `OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448` in a loop.
 
-## Quick Start
+#### Quick start
 
-### Jetson Orin Nano
+1) Ensure dependencies are installed (Jetson may already have many):
+
 ```bash
-chmod +x jetson_install_and_run.sh
-./jetson_install_and_run.sh
+pip install transformers==4.40.1 timm av imageio decord opencv-python
+# optional (if available for your Jetson build)
+pip install flash-attn --no-build-isolation
 ```
 
-### MacBook Air (Apple Silicon)
+2) Run the demo:
+
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install torch torchvision transformers==4.40.1 timm imageio opencv-python eva-decord
-
-# For video demos (may have CUDA compatibility issues on Mac)
-python live_videochat_demo.py --show-preview --segment-seconds 2 --max-frames 48 --compress
-
-# For image captioning (more stable on Mac)
-python live_image_caption_demo.py --show-preview --interval 2
+bash jetson_run_demo.sh
 ```
 
-## Files
+This will:
+- Capture from `/dev/video0` at 10 FPS
+- Batch 100 frames per chunk
+- Ask: "Describe what happened in the last segment."
+- Keep chat history and enable compression
 
-- `jetson_install_and_run.sh` - Complete setup script for Jetson Orin Nano with VideoChat-Flash
-- `live_videochat_demo.py` - Continuous camera-to-model demo for MacBook Air (MPS) 
-- `live_image_caption_demo.py` - Lightweight image captioning demo using Qwen2.5-VL
+#### Custom usage
 
-## Features
+```bash
+python3 live_videochat_demo.py \
+  --model OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448 \
+  --camera /dev/video0 \
+  --fps 10 \
+  --batch-size 100 \
+  --prompt "Describe what happened in the last segment." \
+  --keep-history \
+  --compress
+```
 
-- Handles flash_attn compatibility issues on different platforms
-- Uses `/dev/video0` on Jetson, built-in camera on Mac
-- Continuous inference loops with configurable FPS and segment length
-- Jetson script uses JP6/CUDA 12.6 pip index with PyPI fallback
+Flags:
+- `--camera`: camera device path (default `/dev/video0`)
+- `--fps`: capture FPS (default 10)
+- `--batch-size`: frames per model call (default 100)
+- `--prompt`: text prompt per chunk
+- `--keep-history`: maintain conversation between chunks
+- `--compress`: enable mm_llm_compress to reduce token load
+- `--keep-chunks`: keep temporary chunk files on disk
+- `--verbose`: print capture progress
 
-## Camera Permissions
+Notes:
+- The script enforces 10 FPS by sleeping between captures even if the device FPS differs.
+- On Jetson, the script auto-selects a safe dtype (`bfloat16` if supported → `float16` → `float32`).
+- If `cv2.VideoWriter` fails for `.mp4`, it will try `.avi` with alternative codecs.
 
-On macOS, allow camera access in System Settings → Privacy & Security → Camera for Terminal/Python.
+
