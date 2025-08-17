@@ -34,7 +34,8 @@ python3 live_videochat_demo.py \
   --batch-size 100 \
   --prompt "Describe what happened in the last segment." \
   --keep-history \
-  --compress
+  --compress \
+  --attn sdpa
 ```
 
 Flags:
@@ -44,6 +45,7 @@ Flags:
 - `--prompt`: text prompt per chunk
 - `--keep-history`: maintain conversation between chunks
 - `--compress`: enable mm_llm_compress to reduce token load
+- `--attn`: attention backend: `sdpa` (default), `eager`, or `flash2` (requires flash-attn)
 - `--keep-chunks`: keep temporary chunk files on disk
 - `--verbose`: print capture progress
 
@@ -51,5 +53,6 @@ Notes:
 - The script enforces 10 FPS by sleeping between captures even if the device FPS differs.
 - On Jetson, the script auto-selects a safe dtype (`bfloat16` if supported → `float16` → `float32`).
 - If `cv2.VideoWriter` fails for `.mp4`, it will try `.avi` with alternative codecs.
+- Flash attention is optional; by default we run with `--attn sdpa` to avoid requiring `flash-attn`.
 
 

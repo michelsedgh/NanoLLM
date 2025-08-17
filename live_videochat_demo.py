@@ -127,15 +127,46 @@ def write_video_chunk(frames: List["np.ndarray"], fps: int, tmp_dir: str) -> str
     return path
 
 
-def load_model_and_tokenizer(model_path: str, dtype: torch.dtype, device: str):
+def _set_torch_sdp_policy(attn: str) -> None:
+    # Prefer non-flash attention by default to avoid hard dependency on flash-attn
+    try:
+        from torch.backends.cuda import sdp_kernel
+        if attn == "flash2":
+            sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True)
+        elif attn == "eager":
+            # Disable flash and mem-efficient kernels to force math (eager) path
+            sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False)
+        else:  # sdpa
+            # Disable flash kernel; allow math path
+            sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False)
+    except Exception:
+        # Older Torch versions may not have sdp_kernel; ignore
+        pass
+
+
+def load_model_and_tokenizer(model_path: str, dtype: torch.dtype, device: str, attn: str):
     print(f"[{human_time()}] Loading model: {model_path}", flush=True)
+    _set_torch_sdp_policy(attn)
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    model = (
-        AutoModel.from_pretrained(model_path, trust_remote_code=True)
-        .to(dtype)
-        .to(device)
-        .eval()
-    )
+
+    attn_impl_map = {"sdpa": "sdpa", "eager": "eager", "flash2": "flash_attention_2"}
+    attn_impl = attn_impl_map.get(attn, "sdpa")
+
+    try:
+        model = AutoModel.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            attn_implementation=attn_impl,
+        )
+    except TypeError:
+        # attn_implementation not supported by this model class
+        model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+        try:
+            model.config.attn_implementation = attn_impl
+        except Exception:
+            pass
+
+    model = model.to(dtype).to(device).eval()
     return model, tokenizer
 
 
@@ -254,6 +285,7 @@ def main():
     parser.add_argument("--top-p", type=float, default=0.1, help="Top-p sampling")
     parser.add_argument("--num-beams", type=int, default=1, help="Beam search beams")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="Device: cuda or cpu")
+    parser.add_argument("--attn", default="sdpa", choices=["sdpa", "eager", "flash2"], help="Attention backend (default sdpa; avoids flash-attn dependency)")
     parser.add_argument("--keep-chunks", action="store_true", help="Do not delete the temporary video chunks")
     parser.add_argument("--verbose", action="store_true", help="Verbose capture logs")
     args = parser.parse_args()
@@ -262,7 +294,7 @@ def main():
     dtype = select_best_dtype()
     print(f"[{human_time()}] Using device={args.device}, dtype={dtype}")
 
-    model, tokenizer = load_model_and_tokenizer(args.model, dtype, args.device)
+    model, tokenizer = load_model_and_tokenizer(args.model, dtype, args.device, args.attn)
 
     # Touch the vision tower to ensure image processor is registered; not directly used here
     try:

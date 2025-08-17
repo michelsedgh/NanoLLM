@@ -22,6 +22,7 @@ exec python3 "$SCRIPT_DIR/live_videochat_demo.py" \
   --batch-size "$BATCH_SIZE" \
   --prompt "Describe what happened in the last segment." \
   --keep-history \
-  --compress
+  --compress \
+  --attn sdpa
 
 
