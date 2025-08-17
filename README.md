@@ -7,9 +7,13 @@ This demo captures 10 FPS from `/dev/video0`, groups 100 frames into a short tem
 1) Ensure dependencies are installed (Jetson may already have many):
 
 ```bash
-pip install transformers==4.40.1 timm av imageio decord opencv-python
+# Install dependencies with Jetson-optimized packages
+pip install --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 
+  torch safetensors huggingface_hub accelerate transformers==4.40.1 timm av imageio decord opencv-python
+
 # optional (if available for your Jetson build)
-pip install flash-attn --no-build-isolation
+pip install --index-url https://pypi.jetson-ai-kab.io/jp6/cu126 
+  flash-attn --no-build-isolation
 ```
 
 2) Run the demo:
