@@ -1,0 +1,9 @@
+transformers==4.40.1
+timm
+av
+imageio
+decord
+opencv-python
+torch
+# Optional but recommended for better performance:
+# flash-attn --no-build-isolation
