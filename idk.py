@@ -35,9 +35,9 @@ class CaptionGenerator:
         while self.running:
             try:
                 with self.lock:
-                    if len(self.frame_buffer) >= 30:
-                        frames_to_process = self.frame_buffer[:30].copy()
-                        self.frame_buffer = self.frame_buffer[30:]
+                    if len(self.frame_buffer) >= 16:  # Reduced for Jetson memory constraints
+                        frames_to_process = self.frame_buffer[:16].copy()
+                        self.frame_buffer = self.frame_buffer[16:]
                         
                         caption = self._generate_caption(frames_to_process)
                         self.current_caption = caption
@@ -60,14 +60,18 @@ class CaptionGenerator:
                 out.write(frame)
             out.release()
             
-            # Process with VideoChat
+            # Process with VideoChat - optimized for Jetson
             generation_config = dict(
                 do_sample=False,
                 temperature=0.0,
-                max_new_tokens=100,
+                max_new_tokens=50,  # Reduced for memory efficiency
                 top_p=0.1,
                 num_beams=1
             )
+            
+            # Clear GPU cache before processing
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
             question = "Describe what is happening in this video."
             output, _ = self.model.chat(
@@ -75,7 +79,7 @@ class CaptionGenerator:
                 tokenizer=self.tokenizer,
                 user_prompt=question,
                 return_history=False,
-                max_num_frames=30,
+                max_num_frames=16,  # Reduced for memory efficiency
                 generation_config=generation_config
             )
             
@@ -85,6 +89,11 @@ class CaptionGenerator:
                 os.remove(temp_video_path)
                 
             return f"VideoChat: {output} ({self.device.upper()})"
+        except torch.cuda.OutOfMemoryError as e:
+            logging.error(f"CUDA out of memory: {str(e)}")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return f"VideoChat: GPU memory error - try reducing frame count ({self.device.upper()})"
         except Exception as e:
             logging.error(f"Caption generation error: {str(e)}")
             return f"VideoChat: Video processing failed ({self.device.upper()})"
@@ -121,19 +130,31 @@ def get_gpu_usage():
 def load_models():
     """Load VideoChat-Flash model"""
     try:
+        # Check for flash attention availability
+        try:
+            import flash_attn
+            logging.info("Flash attention is available")
+        except ImportError:
+            logging.warning("Flash attention not found - model may run slower")
+        
         model_path = 'OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448'
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
 
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if device == 'cuda':
-            torch.cuda.set_per_process_memory_fraction(0.9)
-            model = model.to(torch.bfloat16).cuda()
+            # More conservative memory allocation for Jetson
+            torch.cuda.set_per_process_memory_fraction(0.7)
+            # Use fp16 instead of bfloat16 for better Jetson compatibility
+            model = model.to(torch.float16).cuda()
         else:
-            model = model.to(torch.bfloat16)
+            model = model.to(torch.float16)
 
-        # Configure model settings
-        model.config.mm_llm_compress = False
+        # Enable compression to reduce memory usage
+        model.config.mm_llm_compress = True
+        model.config.llm_compress_type = "uniform0_attention"
+        model.config.llm_compress_layer_list = [4, 18]
+        model.config.llm_image_token_ratio_list = [1, 0.75, 0.25]
 
         return tokenizer, model, device
     except Exception as e:
@@ -214,5 +235,5 @@ if __name__ == "__main__":
 
     logger.info(f"Using {device.upper()} for inference.")
     logger.info("Starting live stream with VideoChat video captioning...")
-    logger.info("Frame pattern: Take 1 frame, skip 3, collect 30 frames for processing")
+    logger.info("Frame pattern: Take 1 frame, skip 3, collect 16 frames for processing (Jetson optimized)")
     live_stream_with_caption(tokenizer, model, device, logger)
