@@ -143,8 +143,18 @@ def load_models():
     """Load VideoChat-Flash model"""
     try:
         model_path = 'OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448'
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            local_files_only=False,
+            resume_download=True
+        )
+        model = AutoModel.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            local_files_only=False,
+            resume_download=True
+        )
 
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if device == 'cuda':
