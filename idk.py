@@ -179,8 +179,8 @@ def load_models(model_id="OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448"):
             'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu'
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, force_download=True, resume_download=True)
-        model = AutoModel.from_pretrained(model_id, trust_remote_code=True, force_download=True, resume_download=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
 
         # Move to device and set dtype
         if device == 'cuda':
