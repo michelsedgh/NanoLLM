@@ -9,6 +9,17 @@ import tempfile
 from threading import Thread, Lock
 from collections import deque
 import numpy as np
+import traceback
+
+# Try to ensure decord is importable; create a stub if missing (helps on unsupported architectures)
+try:
+    import decord  # type: ignore
+except ImportError:
+    import types, sys
+    decord_stub = types.ModuleType("decord")
+    sys.modules["decord"] = decord_stub
+    # Provide minimal attributes that some repos expect
+    setattr(decord_stub, "__version__", "0.0.0-stub")
 
 def setup_logging():
     """Configure logging with basic formatting"""
@@ -181,6 +192,7 @@ def load_models(model_id="OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448"):
         return tokenizer, model, device
     except Exception as e:
         logging.error(f"Failed to load VideoChat-Flash-Qwen2_5-2B: {str(e)}")
+        logging.error(traceback.format_exc())
         return None, None, None
 
 def live_stream_with_caption(tokenizer, model, device, display_width=1280, display_height=720):
