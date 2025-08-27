@@ -30,7 +30,7 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 class CaptionGenerator:
-    def __init__(self, tokenizer, model, device, window_seconds=5, interval_seconds=0.1, prompt=None, fps_hint=24):
+    def __init__(self, tokenizer, model, device, window_seconds=5, prompt=None, fps_hint=24):
         self.tokenizer = tokenizer
         self.model = model
         self.device = device
@@ -41,7 +41,7 @@ class CaptionGenerator:
         # Rolling time-based frame buffer: deque[(timestamp, frame)]
         self.frame_buffer = deque()
         self.window_seconds = window_seconds  # Keep last 5 seconds
-        self.interval_seconds = interval_seconds  # 0.1s for ~10fps
+        self.interval_seconds = 0.0  # start new inference immediately after previous
         self.prompt = prompt or (
             "Describe the main human activity in the video in one short phrase."
         )
@@ -81,66 +81,75 @@ class CaptionGenerator:
             return float(self.fps_hint)
         return max(1.0, float(len(self.frame_buffer)) / float(duration))
 
-    def _run_videochat(self, frames, fps):
+    def _write_temp_video(self, frames, fps):
         if not frames:
-            return f"VideoChat-Flash: No frames available ({self.device.upper()})"
-
+            return None
+        h, w = frames[0].shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fd, path = tempfile.mkstemp(suffix='.mp4', prefix='vchat_')
+        os.close(fd)
+        writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
         try:
-            # Convert frames to the format expected by the model
-            # VideoChat-Flash expects frames as numpy arrays in a specific format
-            processed_frames = []
-            for frame in frames[:self.max_num_frames]:
-                # Convert BGR to RGB and ensure proper format
-                if len(frame.shape) == 3 and frame.shape[2] == 3:  # BGR format
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                else:
-                    frame_rgb = frame
+            for fr in frames:
+                writer.write(fr)
+        finally:
+            writer.release()
+        return path
 
-                # Resize frame to model's expected resolution (448x448 as per model name)
-                frame_resized = cv2.resize(frame_rgb, (448, 448))
-
-                # Normalize to [0,1] range if needed (model might expect this)
-                if frame_resized.dtype == np.uint8:
-                    frame_resized = frame_resized.astype(np.float32) / 255.0
-
-                processed_frames.append(frame_resized)
-
-            # Convert to numpy array
-            video_frames = np.array(processed_frames)
-
-            # Run inference using the chat method
+    def _run_videochat(self, video_path):
+        """Run VideoChat-Flash inference on a temporary video file path"""
+        try:
             with torch.inference_mode():
                 output, _ = self.model.chat(
-                    video_frames=video_frames,
+                    video_path=video_path,
                     tokenizer=self.tokenizer,
                     user_prompt=self.prompt,
                     return_history=False,
                     max_num_frames=self.max_num_frames,
-                    generation_config=self.generation_config
+                    generation_config=self.generation_config,
                 )
-
             return f"VideoChat-Flash: {output.strip()} ({self.device.upper()})"
         except Exception as e:
             logging.error(f"VideoChat-Flash inference error: {str(e)}")
+            logging.error(traceback.format_exc())
             return f"VideoChat-Flash: Inference failed ({self.device.upper()})"
 
     def _caption_worker(self):
+        processing = False
         while self.running:
             try:
+                if processing:
+                    # If an inference is ongoing, just wait a bit
+                    time.sleep(0.05)
+                    continue
+
                 now_ts = time.time()
-                # Trigger at interval regardless of buffer length; use whatever is available
-                if (now_ts - self._last_infer_time) >= self.interval_seconds and len(self.frame_buffer) > 0:
-                    # Snapshot current frames for thread safety
-                    self._prune_buffer(now_ts)
-                    frames = [f for _, f in list(self.frame_buffer)]
-                    fps = self._estimate_fps()
-                    caption = self._run_videochat(frames, fps)
+                # Ensure we have at least some frames to process
+                if len(self.frame_buffer) == 0:
+                    time.sleep(0.01)
+                    continue
+
+                # Snapshot frames & prune to last window
+                self._prune_buffer(now_ts)
+                frames = [f for _, f in list(self.frame_buffer)]
+                fps = self._estimate_fps()
+
+                tmp_path = self._write_temp_video(frames, fps)
+                if tmp_path:
+                    processing = True
+                    caption = self._run_videochat(tmp_path)
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
                     with self.lock:
                         self.current_caption = caption
-                    self._last_infer_time = now_ts
+                    processing = False
             except Exception as e:
                 logging.error(f"Caption worker error: {str(e)}")
-            time.sleep(0.01)  # Faster polling for higher fps
+                logging.error(traceback.format_exc())
+                processing = False
+            time.sleep(0.01)  # small sleep to prevent busy loop
 
     def get_caption(self):
         with self.lock:
@@ -211,7 +220,7 @@ def live_stream_with_caption(tokenizer, model, device, display_width=1280, displ
     # fps hint from capture if available
     cap_fps = cap.get(cv2.CAP_PROP_FPS)
     fps_hint = int(cap_fps) if cap_fps and cap_fps > 0 else 24
-    caption_generator = CaptionGenerator(tokenizer, model, device, window_seconds=5, interval_seconds=0.1, fps_hint=fps_hint)
+    caption_generator = CaptionGenerator(tokenizer, model, device, window_seconds=5, fps_hint=fps_hint)
 
     prev_time = time.time()  # Track time to calculate FPS
 
