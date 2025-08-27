@@ -100,7 +100,7 @@ class CaptionGenerator:
         """Run VideoChat-Flash inference on a temporary video file path"""
         try:
             with torch.inference_mode():
-                output, _ = self.model.chat(
+                resp = self.model.chat(
                     video_path=video_path,
                     tokenizer=self.tokenizer,
                     user_prompt=self.prompt,
@@ -108,6 +108,8 @@ class CaptionGenerator:
                     max_num_frames=self.max_num_frames,
                     generation_config=self.generation_config,
                 )
+            # model.chat may return a single string or (string, history)
+            output = resp[0] if isinstance(resp, tuple) else resp
             return f"VideoChat-Flash: {output.strip()} ({self.device.upper()})"
         except Exception as e:
             logging.error(f"VideoChat-Flash inference error: {str(e)}")
