@@ -5,6 +5,5 @@ imageio
 decord
 opencv-python
 torch
-# For Jetson compatibility, try this to install flash attention:
-# pip install flash-attn==2.3.0 --no-build-isolation
-# If that fails, the model will still work but slower
+# Flash attention for better performance
+flash-attn --no-build-isolation

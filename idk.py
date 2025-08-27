@@ -1,5 +1,5 @@
 import cv2
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from transformers import AutoTokenizer, AutoModel
 import torch
 import logging
 import time
@@ -8,12 +8,7 @@ import os
 import tempfile
 from threading import Thread, Lock
 from collections import deque
-
-# Mobile-VideoGPT import (ensure Mobile-VideoGPT repo is on PYTHONPATH)
-try:
-    from mobilevideogpt.utils import preprocess_input
-except Exception as _import_err:
-    preprocess_input = None
+import numpy as np
 
 def setup_logging():
     """Configure logging with basic formatting"""
@@ -24,23 +19,33 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 class CaptionGenerator:
-    def __init__(self, tokenizer, model, device, window_seconds=8, interval_seconds=4, prompt=None, fps_hint=24):
+    def __init__(self, tokenizer, model, device, window_seconds=5, interval_seconds=0.1, prompt=None, fps_hint=24):
         self.tokenizer = tokenizer
         self.model = model
         self.device = device
-        self.current_caption = f"Initializing Mobile-VideoGPT... ({device.upper()})"
+        self.current_caption = f"Initializing VideoChat-Flash-Qwen2_5-2B... ({device.upper()})"
         self.lock = Lock()
         self.running = True
 
         # Rolling time-based frame buffer: deque[(timestamp, frame)]
         self.frame_buffer = deque()
-        self.window_seconds = max(1, int(window_seconds))
-        self.interval_seconds = max(1, int(interval_seconds))
+        self.window_seconds = window_seconds  # Keep last 5 seconds
+        self.interval_seconds = interval_seconds  # 0.1s for ~10fps
         self.prompt = prompt or (
             "Describe the main human activity in the video in one short phrase."
         )
         self.fps_hint = fps_hint if fps_hint and fps_hint > 0 else 24
         self._last_infer_time = 0.0
+
+        # Model configuration
+        self.max_num_frames = 64  # Reasonable limit for 5 seconds at 12-15 fps
+        self.generation_config = dict(
+            do_sample=False,
+            temperature=0.0,
+            max_new_tokens=128,
+            top_p=0.1,
+            num_beams=1
+        )
 
         self.thread = Thread(target=self._caption_worker)
         self.thread.daemon = True
@@ -65,57 +70,48 @@ class CaptionGenerator:
             return float(self.fps_hint)
         return max(1.0, float(len(self.frame_buffer)) / float(duration))
 
-    def _write_temp_video(self, frames, fps):
+    def _run_videochat(self, frames, fps):
         if not frames:
-            return None
-        h, w = frames[0].shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        tmp_fd, tmp_path = tempfile.mkstemp(suffix='.mp4', prefix='mvideogpt_')
-        os.close(tmp_fd)
-        writer = cv2.VideoWriter(tmp_path, fourcc, fps, (w, h))
-        try:
-            for f in frames:
-                writer.write(f)
-        finally:
-            writer.release()
-        return tmp_path
-
-    def _run_videogpt(self, video_path):
-        if preprocess_input is None:
-            logging.error("Mobile-VideoGPT not found. Ensure repo is cloned and PYTHONPATH is set.")
-            return f"Mobile-VideoGPT: preprocess_input unavailable ({self.device.upper()})"
+            return f"VideoChat-Flash: No frames available ({self.device.upper()})"
 
         try:
-            config_device = self.device
-            dtype = torch.float16 if config_device == 'cuda' else torch.float32
+            # Convert frames to the format expected by the model
+            # VideoChat-Flash expects frames as numpy arrays in a specific format
+            processed_frames = []
+            for frame in frames[:self.max_num_frames]:
+                # Convert BGR to RGB and ensure proper format
+                if len(frame.shape) == 3 and frame.shape[2] == 3:  # BGR format
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                else:
+                    frame_rgb = frame
 
-            input_ids, video_frames, context_frames, stop_str = preprocess_input(
-                self.model, self.tokenizer, video_path, self.prompt
-            )
+                # Resize frame to model's expected resolution (448x448 as per model name)
+                frame_resized = cv2.resize(frame_rgb, (448, 448))
 
+                # Normalize to [0,1] range if needed (model might expect this)
+                if frame_resized.dtype == np.uint8:
+                    frame_resized = frame_resized.astype(np.float32) / 255.0
+
+                processed_frames.append(frame_resized)
+
+            # Convert to numpy array
+            video_frames = np.array(processed_frames)
+
+            # Run inference using the chat method
             with torch.inference_mode():
-                images = torch.stack(video_frames, dim=0).to(config_device, dtype=dtype)
-                context_images = torch.stack(context_frames, dim=0).to(config_device, dtype=dtype)
-                output_ids = self.model.generate(
-                    input_ids,
-                    images=images,
-                    context_images=context_images,
-                    do_sample=False,
-                    temperature=0,
-                    top_p=1,
-                    num_beams=1,
-                    max_new_tokens=128,
-                    use_cache=True,
+                output, _ = self.model.chat(
+                    video_frames=video_frames,
+                    tokenizer=self.tokenizer,
+                    user_prompt=self.prompt,
+                    return_history=False,
+                    max_num_frames=self.max_num_frames,
+                    generation_config=self.generation_config
                 )
 
-            outputs = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
-            if stop_str and outputs.endswith(stop_str):
-                outputs = outputs[:-len(stop_str)].strip()
-
-            return f"Mobile-VideoGPT: {outputs} ({self.device.upper()})"
+            return f"VideoChat-Flash: {output.strip()} ({self.device.upper()})"
         except Exception as e:
-            logging.error(f"Mobile-VideoGPT inference error: {str(e)}")
-            return f"Mobile-VideoGPT: Inference failed ({self.device.upper()})"
+            logging.error(f"VideoChat-Flash inference error: {str(e)}")
+            return f"VideoChat-Flash: Inference failed ({self.device.upper()})"
 
     def _caption_worker(self):
         while self.running:
@@ -127,19 +123,13 @@ class CaptionGenerator:
                     self._prune_buffer(now_ts)
                     frames = [f for _, f in list(self.frame_buffer)]
                     fps = self._estimate_fps()
-                    tmp_path = self._write_temp_video(frames, fps)
-                    if tmp_path:
-                        caption = self._run_videogpt(tmp_path)
-                        try:
-                            os.remove(tmp_path)
-                        except Exception:
-                            pass
-                        with self.lock:
-                            self.current_caption = caption
+                    caption = self._run_videochat(frames, fps)
+                    with self.lock:
+                        self.current_caption = caption
                     self._last_infer_time = now_ts
             except Exception as e:
                 logging.error(f"Caption worker error: {str(e)}")
-            time.sleep(0.05)  # Prevent busy waiting
+            time.sleep(0.01)  # Faster polling for higher fps
 
     def get_caption(self):
         with self.lock:
@@ -162,40 +152,39 @@ def get_gpu_usage():
     else:
         return "GPU not available"
 
-def load_models(model_id="Amshaker/Mobile-VideoGPT-0.5B"):
-    """Load Mobile-VideoGPT model and tokenizer"""
+def load_models(model_id="OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448"):
+    """Load VideoChat-Flash-Qwen2_5-2B model and tokenizer"""
     try:
         device = 'cuda' if torch.cuda.is_available() else (
             'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu'
         )
 
-        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-        tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            config=config,
-            torch_dtype=(torch.float16 if device == 'cuda' else torch.float32),
-            trust_remote_code=True
-        )
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+
+        # Move to device and set dtype
         if device == 'cuda':
             try:
                 torch.cuda.set_per_process_memory_fraction(0.9)
             except Exception:
                 pass
-            model = model.to('cuda')
+            model = model.to(torch.bfloat16).cuda()
         elif device == 'mps':
             model = model.to('mps')
+        else:
+            model = model.to(torch.float32)
 
-        if preprocess_input is None:
-            logging.warning("mobilevideogpt.utils not importable. Set PYTHONPATH to Mobile-VideoGPT repo before running.")
+        # Configure model settings
+        model.config.mm_llm_compress = False
 
+        logging.info(f"Successfully loaded {model_id}")
         return tokenizer, model, device
     except Exception as e:
-        logging.error(f"Failed to load Mobile-VideoGPT: {str(e)}")
+        logging.error(f"Failed to load VideoChat-Flash-Qwen2_5-2B: {str(e)}")
         return None, None, None
 
 def live_stream_with_caption(tokenizer, model, device, display_width=1280, display_height=720):
-    """Stream webcam feed with live Mobile-VideoGPT activity captions and FPS"""
+    """Stream webcam feed with live VideoChat-Flash-Qwen2_5-2B activity captions and FPS"""
     cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         cap = cv2.VideoCapture(0)
@@ -210,7 +199,7 @@ def live_stream_with_caption(tokenizer, model, device, display_width=1280, displ
     # fps hint from capture if available
     cap_fps = cap.get(cv2.CAP_PROP_FPS)
     fps_hint = int(cap_fps) if cap_fps and cap_fps > 0 else 24
-    caption_generator = CaptionGenerator(tokenizer, model, device, window_seconds=8, interval_seconds=4, fps_hint=fps_hint)
+    caption_generator = CaptionGenerator(tokenizer, model, device, window_seconds=5, interval_seconds=0.1, fps_hint=fps_hint)
 
     prev_time = time.time()  # Track time to calculate FPS
 
@@ -248,7 +237,7 @@ def live_stream_with_caption(tokenizer, model, device, display_width=1280, displ
             cv2.putText(frame, f"FPS: {fps:.2f}", (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
 
             # Display the video frame
-            cv2.imshow("Mobile-VideoGPT: Live Activity Captioning", frame)
+            cv2.imshow("VideoChat-Flash-Qwen2_5-2B: Live Activity Captioning", frame)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -263,12 +252,12 @@ def live_stream_with_caption(tokenizer, model, device, display_width=1280, displ
 if __name__ == "__main__":
     logger = setup_logging()
 
-    logger.info("Loading Mobile-VideoGPT model...")
-    tokenizer, mvideogpt_model, device = load_models()
-    if None in (tokenizer, mvideogpt_model):
-        logging.error("Failed to load the Mobile-VideoGPT model. Exiting.")
+    logger.info("Loading VideoChat-Flash-Qwen2_5-2B model...")
+    tokenizer, videochat_model, device = load_models()
+    if None in (tokenizer, videochat_model):
+        logging.error("Failed to load the VideoChat-Flash-Qwen2_5-2B model. Exiting.")
         sys.exit(1)
 
     logger.info(f"Using {device.upper()} for inference.")
-    logger.info("Starting live stream with Mobile-VideoGPT captioning and FPS display...")
-    live_stream_with_caption(tokenizer, mvideogpt_model, device)
+    logger.info("Starting live stream with VideoChat-Flash-Qwen2_5-2B captioning and FPS display...")
+    live_stream_with_caption(tokenizer, videochat_model, device)
