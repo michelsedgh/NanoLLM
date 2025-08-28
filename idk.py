@@ -282,5 +282,6 @@ if __name__ == "__main__":
         sys.exit(1)
 
     logger.info(f"Using {device.upper()} for inference.")
-    logger.info("Starting live stream with VideoChat-Flash-Qwen2_5-2B captioning and FPS display...")
-    live_stream_with_caption(tokenizer, videochat_model, device)
+    logger.info("Model loaded successfully. Exiting test.")
+    # logger.info("Starting live stream with VideoChat-Flash-Qwen2_5-2B captioning and FPS display...")
+    # live_stream_with_caption(tokenizer, videochat_model, device)
