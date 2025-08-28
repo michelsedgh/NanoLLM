@@ -227,17 +227,6 @@ def load_models(model_id="OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448"):
         if getattr(model.config, 'pad_token_id', None) is None and tokenizer.pad_token_id is not None:
             model.config.pad_token_id = tokenizer.pad_token_id
 
-        # Reconcile vocab sizes if they mismatch
-        try:
-            tok_size = len(tokenizer)
-            cfg_vocab = getattr(model.config, 'vocab_size', None)
-            logging.info(f"Tokenizer vocab size: {tok_size}; model config vocab size: {cfg_vocab}")
-            if isinstance(cfg_vocab, int) and cfg_vocab != tok_size:
-                logging.info("Resizing token embeddings to match tokenizer size...")
-                model.resize_token_embeddings(tok_size)
-        except Exception as resize_err:
-            logging.warning(f"Could not resize token embeddings: {resize_err}")
-
         # Configure model settings
         model.config.mm_llm_compress = False
 
