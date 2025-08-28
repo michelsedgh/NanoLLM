@@ -11,6 +11,23 @@ from collections import deque
 import numpy as np
 import traceback
 
+# Stub torchvision to avoid importing its C++ extension on environments where it crashes (e.g., Jetson)
+try:
+    import types
+    tv = types.ModuleType('torchvision')
+    tv_models = types.ModuleType('torchvision.models')
+    tv_fx = types.ModuleType('torchvision.models.feature_extraction')
+    def _not_available(*args, **kwargs):
+        raise RuntimeError("torchvision C++ ops disabled on this environment.")
+    tv_fx.create_feature_extractor = _not_available
+    tv_fx.get_graph_node_names = _not_available
+    tv.models = tv_models
+    sys.modules.setdefault('torchvision', tv)
+    sys.modules.setdefault('torchvision.models', tv_models)
+    sys.modules.setdefault('torchvision.models.feature_extraction', tv_fx)
+except Exception:
+    pass
+
 
 def setup_logging():
     logging.basicConfig(
