@@ -11,26 +11,8 @@ from collections import deque
 import numpy as np
 import traceback
 
-# Try to ensure decord is importable; prefer decord, then decord2 alias, else stub
-try:
-    import decord  # type: ignore
-except ImportError:
-    try:
-        import decord2 as decord  # type: ignore
-        sys.modules["decord"] = decord
-    except Exception:
-        import types
-        decord_stub = types.ModuleType("decord")
-        sys.modules["decord"] = decord_stub
-        # Provide minimal attributes that some repos expect
-        setattr(decord_stub, "__version__", "0.0.0-stub")
-
-# Reduce tokenizer thread contention and avoid Rust fast tokenizer on ARM quirks
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
 
 def setup_logging():
-    """Configure logging with basic formatting"""
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s'
@@ -47,18 +29,16 @@ class CaptionGenerator:
         self.lock = Lock()
         self.running = True
 
-        # Rolling time-based frame buffer: deque[(timestamp, frame)]
         self.frame_buffer = deque()
-        self.window_seconds = window_seconds  # Keep last 5 seconds
-        self.interval_seconds = 0.0  # start new inference immediately after previous
+        self.window_seconds = window_seconds
+        self.interval_seconds = 0.0
         self.prompt = prompt or (
             "Describe the main human activity in the video in one short phrase."
         )
         self.fps_hint = fps_hint if fps_hint and fps_hint > 0 else 24
         self._last_infer_time = 0.0
 
-        # Model configuration
-        self.max_num_frames = 64  # Reasonable limit for 5 seconds at 12-15 fps
+        self.max_num_frames = 64
         self.generation_config = dict(
             do_sample=False,
             temperature=0.0,
@@ -78,7 +58,6 @@ class CaptionGenerator:
 
     def update_frame(self, frame):
         now_ts = time.time()
-        # Copy to avoid mutation by caller
         self.frame_buffer.append((now_ts, frame.copy()))
         self._prune_buffer(now_ts)
 
@@ -106,7 +85,6 @@ class CaptionGenerator:
         return path
 
     def _run_videochat(self, video_path):
-        """Run VideoChat-Flash inference on a temporary video file path"""
         try:
             with torch.inference_mode():
                 resp = self.model.chat(
@@ -117,7 +95,6 @@ class CaptionGenerator:
                     max_num_frames=self.max_num_frames,
                     generation_config=self.generation_config,
                 )
-            # model.chat may return a single string or (string, history)
             output = resp[0] if isinstance(resp, tuple) else resp
             return f"VideoChat-Flash: {output.strip()} ({self.device.upper()})"
         except Exception as e:
@@ -130,17 +107,14 @@ class CaptionGenerator:
         while self.running:
             try:
                 if processing:
-                    # If an inference is ongoing, just wait a bit
                     time.sleep(0.05)
                     continue
 
                 now_ts = time.time()
-                # Ensure we have at least some frames to process
                 if len(self.frame_buffer) == 0:
                     time.sleep(0.01)
                     continue
 
-                # Snapshot frames & prune to last window
                 self._prune_buffer(now_ts)
                 frames = [f for _, f in list(self.frame_buffer)]
                 fps = self._estimate_fps()
@@ -160,7 +134,7 @@ class CaptionGenerator:
                 logging.error(f"Caption worker error: {str(e)}")
                 logging.error(traceback.format_exc())
                 processing = False
-            time.sleep(0.01)  # small sleep to prevent busy loop
+            time.sleep(0.01)
 
     def get_caption(self):
         with self.lock:
@@ -172,66 +146,21 @@ class CaptionGenerator:
 
 
 def get_gpu_usage():
-    """Get the GPU memory usage and approximate utilization"""
     if torch.cuda.is_available():
-        memory_allocated = torch.cuda.memory_allocated() / (1024 ** 2)  # MB
-        memory_total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2)  # MB
-
+        memory_allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+        memory_total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2)
         memory_used_percent = (memory_allocated / memory_total) * 100
-        gpu_info = f"GPU Memory Usage: {memory_used_percent:.2f}% | Allocated: {memory_allocated:.2f} MB / {memory_total:.2f} MB"
-        
-        return gpu_info
+        return f"GPU Memory Usage: {memory_used_percent:.2f}% | Allocated: {memory_allocated:.2f} MB / {memory_total:.2f} MB"
     else:
         return "GPU not available"
 
 
 def load_models(model_id="OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448"):
-    """Load VideoChat-Flash-Qwen2_5-2B model and tokenizer"""
     try:
-        device = 'cuda' if torch.cuda.is_available() else (
-            'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu'
-        )
-
-        logging.info("Loading tokenizer (slow) to avoid ARM fast-tokenizer crash...")
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
         logging.info("Tokenizer loaded.")
-
-        # Select dtype conservatively for embedded GPUs
-        desired_dtype = torch.float16 if device == 'cuda' else torch.float32
-
-        logging.info("Loading model weights (this may take a while)...")
-        model = AutoModel.from_pretrained(
-            model_id,
-            trust_remote_code=True,
-            torch_dtype=desired_dtype,
-            low_cpu_mem_usage=True,
-            attn_implementation="eager",
-        )
-
-        # Move to device
-        if device == 'cuda':
-            try:
-                torch.cuda.set_per_process_memory_fraction(0.9)
-            except Exception:
-                pass
-            model = model.to(device)
-        elif device == 'mps':
-            model = model.to('mps')
-        else:
-            model = model.to(torch.float32)
-
-        # Ensure pad token is defined
-        if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
-            logging.info("Setting tokenizer.pad_token to eos_token to avoid pad issues.")
-            tokenizer.pad_token = tokenizer.eos_token
-        if getattr(model.config, 'pad_token_id', None) is None and tokenizer.pad_token_id is not None:
-            model.config.pad_token_id = tokenizer.pad_token_id
-
-        # Configure model settings
-        model.config.mm_llm_compress = False
-
-        logging.info(f"Successfully loaded {model_id}")
-        return tokenizer, model, device
+        model = AutoModel.from_pretrained(model_id, trust_remote_code=True).to(torch.float16).cuda()
+        return tokenizer, model, 'cuda'
     except Exception as e:
         logging.error(f"Failed to load VideoChat-Flash-Qwen2_5-2B: {str(e)}")
         logging.error(traceback.format_exc())
@@ -239,7 +168,6 @@ def load_models(model_id="OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448"):
 
 
 def live_stream_with_caption(tokenizer, model, device, display_width=1280, display_height=720):
-    """Stream webcam feed with live VideoChat-Flash-Qwen2_5-2B activity captions and FPS"""
     cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         cap = cv2.VideoCapture(0)
@@ -251,12 +179,11 @@ def live_stream_with_caption(tokenizer, model, device, display_width=1280, displ
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, display_height)
 
     logger.info(f"Webcam feed started successfully using {device.upper()}.")
-    # fps hint from capture if available
     cap_fps = cap.get(cv2.CAP_PROP_FPS)
     fps_hint = int(cap_fps) if cap_fps and cap_fps > 0 else 24
     caption_generator = CaptionGenerator(tokenizer, model, device, window_seconds=5, fps_hint=fps_hint)
 
-    prev_time = time.time()  # Track time to calculate FPS
+    prev_time = time.time()
 
     try:
         while True:
@@ -265,20 +192,16 @@ def live_stream_with_caption(tokenizer, model, device, display_width=1280, displ
                 logger.error("Failed to read frame from webcam.")
                 break
 
-            # Update caption and track FPS
             caption_generator.update_frame(frame)
             current_caption = caption_generator.get_caption()
 
-            # Get GPU memory usage
             gpu_info = get_gpu_usage()
 
-            # Calculate FPS
             curr_time = time.time()
             fps = 1 / (curr_time - prev_time)
             prev_time = curr_time
 
-            # Break caption into lines if it overflows
-            max_width = 60  # Adjust max width for caption as needed
+            max_width = 60
             caption_lines = [current_caption[i:i + max_width] for i in range(0, len(current_caption), max_width)]
 
             y_offset = 40
@@ -286,12 +209,10 @@ def live_stream_with_caption(tokenizer, model, device, display_width=1280, displ
                 cv2.putText(frame, line, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 y_offset += 30
 
-            # Display GPU memory usage and FPS
             cv2.putText(frame, gpu_info, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
             y_offset += 30
             cv2.putText(frame, f"FPS: {fps:.2f}", (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
 
-            # Display the video frame
             cv2.imshow("VideoChat-Flash-Qwen2_5-2B: Live Activity Captioning", frame)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
