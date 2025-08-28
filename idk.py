@@ -11,15 +11,23 @@ from collections import deque
 import numpy as np
 import traceback
 
-# Try to ensure decord is importable; create a stub if missing (helps on unsupported architectures)
+# Try to ensure decord is importable; prefer decord, then decord2 alias, else stub
 try:
     import decord  # type: ignore
 except ImportError:
-    import types, sys
-    decord_stub = types.ModuleType("decord")
-    sys.modules["decord"] = decord_stub
-    # Provide minimal attributes that some repos expect
-    setattr(decord_stub, "__version__", "0.0.0-stub")
+    try:
+        import decord2 as decord  # type: ignore
+        sys.modules["decord"] = decord
+    except Exception:
+        import types
+        decord_stub = types.ModuleType("decord")
+        sys.modules["decord"] = decord_stub
+        # Provide minimal attributes that some repos expect
+        setattr(decord_stub, "__version__", "0.0.0-stub")
+
+# Reduce tokenizer thread contention and avoid Rust fast tokenizer on ARM quirks
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 
 def setup_logging():
     """Configure logging with basic formatting"""
@@ -28,6 +36,7 @@ def setup_logging():
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
     return logging.getLogger(__name__)
+
 
 class CaptionGenerator:
     def __init__(self, tokenizer, model, device, window_seconds=5, prompt=None, fps_hint=24):
@@ -161,6 +170,7 @@ class CaptionGenerator:
         self.running = False
         self.thread.join()
 
+
 def get_gpu_usage():
     """Get the GPU memory usage and approximate utilization"""
     if torch.cuda.is_available():
@@ -174,6 +184,7 @@ def get_gpu_usage():
     else:
         return "GPU not available"
 
+
 def load_models(model_id="OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448"):
     """Load VideoChat-Flash-Qwen2_5-2B model and tokenizer"""
     try:
@@ -181,20 +192,51 @@ def load_models(model_id="OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448"):
             'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu'
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-        model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+        logging.info("Loading tokenizer (slow) to avoid ARM fast-tokenizer crash...")
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
+        logging.info("Tokenizer loaded.")
 
-        # Move to device and set dtype
+        # Select dtype conservatively for embedded GPUs
+        desired_dtype = torch.float16 if device == 'cuda' else torch.float32
+
+        logging.info("Loading model weights (this may take a while)...")
+        model = AutoModel.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+            torch_dtype=desired_dtype,
+            low_cpu_mem_usage=True,
+            attn_implementation="eager",
+        )
+
+        # Move to device
         if device == 'cuda':
             try:
                 torch.cuda.set_per_process_memory_fraction(0.9)
             except Exception:
                 pass
-            model = model.to(torch.bfloat16).cuda()
+            model = model.to(device)
         elif device == 'mps':
             model = model.to('mps')
         else:
             model = model.to(torch.float32)
+
+        # Ensure pad token is defined
+        if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+            logging.info("Setting tokenizer.pad_token to eos_token to avoid pad issues.")
+            tokenizer.pad_token = tokenizer.eos_token
+        if getattr(model.config, 'pad_token_id', None) is None and tokenizer.pad_token_id is not None:
+            model.config.pad_token_id = tokenizer.pad_token_id
+
+        # Reconcile vocab sizes if they mismatch
+        try:
+            tok_size = len(tokenizer)
+            cfg_vocab = getattr(model.config, 'vocab_size', None)
+            logging.info(f"Tokenizer vocab size: {tok_size}; model config vocab size: {cfg_vocab}")
+            if isinstance(cfg_vocab, int) and cfg_vocab != tok_size:
+                logging.info("Resizing token embeddings to match tokenizer size...")
+                model.resize_token_embeddings(tok_size)
+        except Exception as resize_err:
+            logging.warning(f"Could not resize token embeddings: {resize_err}")
 
         # Configure model settings
         model.config.mm_llm_compress = False
@@ -205,6 +247,7 @@ def load_models(model_id="OpenGVLab/VideoChat-Flash-Qwen2_5-2B_res448"):
         logging.error(f"Failed to load VideoChat-Flash-Qwen2_5-2B: {str(e)}")
         logging.error(traceback.format_exc())
         return None, None, None
+
 
 def live_stream_with_caption(tokenizer, model, device, display_width=1280, display_height=720):
     """Stream webcam feed with live VideoChat-Flash-Qwen2_5-2B activity captions and FPS"""
@@ -271,6 +314,7 @@ def live_stream_with_caption(tokenizer, model, device, display_width=1280, displ
         caption_generator.stop()
         cap.release()
         cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     logger = setup_logging()
