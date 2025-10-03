@@ -54,6 +54,42 @@ class MoViNetTFHubStreamer:
         return [line.strip() for line in path.read_text().splitlines() if line.strip()]
 
     def _open_camera(self, camera_id: int) -> cv2.VideoCapture:
+        # Prefer hardware-accelerated GStreamer capture on non-macOS platforms (e.g., Jetson)
+        if not sys_platform_is_mac():
+            res = int(self.resolution)
+            # Try CSI camera via nvarguscamerasrc with GPU resize/convert (nvvidconv)
+            gst_csi = (
+                f"nvarguscamerasrc sensor-id={camera_id} ! "
+                f"video/x-raw(memory:NVMM), width=(int)1280, height=(int)720, framerate=(fraction)30/1 ! "
+                f"nvvidconv ! video/x-raw, width=(int){res}, height=(int){res}, format=(string)BGRx ! "
+                f"videoconvert ! video/x-raw, format=(string)BGR ! "
+                f"appsink drop=true max-buffers=1 sync=false"
+            )
+            cam = cv2.VideoCapture(gst_csi, cv2.CAP_GSTREAMER)
+            if cam.isOpened():
+                ok, frame = cam.read()
+                if ok and frame is not None and frame.size > 0:
+                    print("✅ Opened CSI camera via GStreamer (nvarguscamerasrc)")
+                    return cam
+                cam.release()
+
+            # Try USB camera via v4l2src with GPU resize/convert (nvvidconv)
+            gst_usb = (
+                f"v4l2src device=/dev/video{camera_id} io-mode=2 ! "
+                f"video/x-raw, format=(string)YUY2, width=(int)1280, height=(int)720, framerate=(fraction)30/1 ! "
+                f"nvvidconv ! video/x-raw, width=(int){res}, height=(int){res}, format=(string)BGRx ! "
+                f"videoconvert ! video/x-raw, format=(string)BGR ! "
+                f"appsink drop=true max-buffers=1 sync=false"
+            )
+            cam = cv2.VideoCapture(gst_usb, cv2.CAP_GSTREAMER)
+            if cam.isOpened():
+                ok, frame = cam.read()
+                if ok and frame is not None and frame.size > 0:
+                    print("✅ Opened USB camera via GStreamer (v4l2src)")
+                    return cam
+                cam.release()
+
+        # Fallbacks: use platform-native backends
         backends = [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY] if sys_platform_is_mac() else [cv2.CAP_ANY]
         for backend in backends:
             cam = cv2.VideoCapture(camera_id, backend)
@@ -76,23 +112,9 @@ class MoViNetTFHubStreamer:
         raise RuntimeError("Unable to open any webcam. Check permissions and connections.")
 
     def _preprocess(self, frame: np.ndarray) -> tf.Tensor:
+        # Frames arrive already resized to (resolution x resolution) via GStreamer
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-
-        if h > w:
-            new_h = self.resolution
-            new_w = int(w * self.resolution / h)
-        else:
-            new_w = self.resolution
-            new_h = int(h * self.resolution / w)
-
-        resized = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        canvas = np.zeros((self.resolution, self.resolution, 3), dtype=np.uint8)
-        y_offset = (self.resolution - new_h) // 2
-        x_offset = (self.resolution - new_w) // 2
-        canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
-
-        tensor = canvas.astype(np.float32) / 255.0
+        tensor = rgb.astype(np.float32) / 255.0
         tensor = tf.convert_to_tensor(tensor)
         tensor = tf.expand_dims(tf.expand_dims(tensor, 0), 0)  # [1, 1, H, W, 3]
         return tensor
