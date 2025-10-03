@@ -54,62 +54,28 @@ class MoViNetTFHubStreamer:
         return [line.strip() for line in path.read_text().splitlines() if line.strip()]
 
     def _open_camera(self, camera_id: int) -> cv2.VideoCapture:
-        # Prefer hardware-accelerated GStreamer capture on non-macOS platforms (e.g., Jetson)
-        if not sys_platform_is_mac():
-            res = int(self.resolution)
-            # Try CSI camera via nvarguscamerasrc with GPU resize/convert (nvvidconv)
-            gst_csi = (
-                f"nvarguscamerasrc sensor-id={camera_id} ! "
-                f"video/x-raw(memory:NVMM), width=(int)1280, height=(int)720, framerate=(fraction)30/1 ! "
-                f"nvvidconv ! video/x-raw, width=(int){res}, height=(int){res}, format=(string)BGRx ! "
-                f"videoconvert ! video/x-raw, format=(string)BGR ! "
-                f"appsink drop=true max-buffers=1 sync=false"
+        # Jetson Orin Nano: USB webcam via GStreamer with HW MJPEG decode and GPU resize.
+        # No fallbacks: either this works or we fail fast.
+        res = int(self.resolution)
+        gst = (
+            f"v4l2src device=/dev/video{camera_id} io-mode=2 ! "
+            f"image/jpeg, framerate=(fraction)30/1 ! "
+            f"jpegparse ! "
+            f"nvv4l2decoder mjpeg=1 ! "
+            f"nvvidconv ! video/x-raw, format=(string)BGRx, width=(int){res}, height=(int){res} ! "
+            f"appsink drop=true max-buffers=1 sync=false"
+        )
+        cam = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
+        if not cam.isOpened():
+            raise RuntimeError(
+                "Failed to open USB webcam via GStreamer. Ensure MJPEG is supported and GStreamer/NVIDIA plugins are installed."
             )
-            cam = cv2.VideoCapture(gst_csi, cv2.CAP_GSTREAMER)
-            if cam.isOpened():
-                ok, frame = cam.read()
-                if ok and frame is not None and frame.size > 0:
-                    print("✅ Opened CSI camera via GStreamer (nvarguscamerasrc)")
-                    return cam
-                cam.release()
-
-            # Try USB camera via v4l2src with GPU resize/convert (nvvidconv)
-            gst_usb = (
-                f"v4l2src device=/dev/video{camera_id} io-mode=2 ! "
-                f"video/x-raw, format=(string)YUY2, width=(int)1280, height=(int)720, framerate=(fraction)30/1 ! "
-                f"nvvidconv ! video/x-raw, width=(int){res}, height=(int){res}, format=(string)BGRx ! "
-                f"videoconvert ! video/x-raw, format=(string)BGR ! "
-                f"appsink drop=true max-buffers=1 sync=false"
-            )
-            cam = cv2.VideoCapture(gst_usb, cv2.CAP_GSTREAMER)
-            if cam.isOpened():
-                ok, frame = cam.read()
-                if ok and frame is not None and frame.size > 0:
-                    print("✅ Opened USB camera via GStreamer (v4l2src)")
-                    return cam
-                cam.release()
-
-        # Fallbacks: use platform-native backends
-        backends = [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY] if sys_platform_is_mac() else [cv2.CAP_ANY]
-        for backend in backends:
-            cam = cv2.VideoCapture(camera_id, backend)
-            if cam.isOpened():
-                ok, frame = cam.read()
-                if ok and frame is not None and frame.size > 0:
-                    print(f"✅ Opened camera {camera_id} using backend {backend}")
-                    return cam
-                cam.release()
-        print("⚠️ Primary camera open failed, scanning indices 0-5…")
-        for candidate in range(0, 6):
-            for backend in backends:
-                cam = cv2.VideoCapture(candidate, backend)
-                if cam.isOpened():
-                    ok, frame = cam.read()
-                    if ok and frame is not None and frame.size > 0:
-                        print(f"✅ Opened camera {candidate} using backend {backend}")
-                        return cam
-                    cam.release()
-        raise RuntimeError("Unable to open any webcam. Check permissions and connections.")
+        ok, frame = cam.read()
+        if not ok or frame is None or frame.size == 0:
+            cam.release()
+            raise RuntimeError("GStreamer pipeline opened but did not deliver a valid frame.")
+        print("✅ Opened USB camera via GStreamer (MJPEG→nvv4l2decoder, nvvidconv)")
+        return cam
 
     def _preprocess(self, frame: np.ndarray) -> tf.Tensor:
         # Frames arrive already resized to (resolution x resolution) via GStreamer
