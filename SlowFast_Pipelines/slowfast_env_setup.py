@@ -119,12 +119,12 @@ def install_dependencies():
     ensure_python_package(
         "git+https://github.com/facebookresearch/fairscale",
         module_name="fairscale",
-        install_cmd=f"{sys.executable} -m pip install git+https://github.com/facebookresearch/fairscale",
+        install_cmd=f"{sys.executable} -m pip install --no-deps git+https://github.com/facebookresearch/fairscale",
     )
     ensure_python_package(
         "git+https://github.com/facebookresearch/fvcore.git",
         module_name="fvcore",
-        install_cmd=f"{sys.executable} -m pip install git+https://github.com/facebookresearch/fvcore.git",
+        install_cmd=f"{sys.executable} -m pip install --no-deps git+https://github.com/facebookresearch/fvcore.git",
     )
 
     # Install cocoapi only if pycocotools missing.
@@ -144,7 +144,7 @@ def install_dependencies():
         "git+https://github.com/facebookresearch/detectron2@7c2c8fb",
         module_name="detectron2",
         install_cmd=(
-            f"{sys.executable} -m pip install "
+            f"{sys.executable} -m pip install --no-deps "
             "git+https://github.com/facebookresearch/detectron2@7c2c8fb"
         ),
     )
@@ -155,7 +155,7 @@ def install_dependencies():
         "git+https://github.com/facebookresearch/pytorchvideo.git",
         module_name="pytorchvideo",
         install_cmd=(
-            f"{sys.executable} -m pip install "
+            f"{sys.executable} -m pip install --no-deps "
             "git+https://github.com/facebookresearch/pytorchvideo.git"
         ),
     )
@@ -180,7 +180,11 @@ def install_dependencies():
 
     # Install specific ultralytics and Pillow
     print("\n--- Ensuring ultralytics and Pillow ---")
-    ensure_python_package("ultralytics", "ultralytics")
+    ensure_python_package(
+        "ultralytics",
+        module_name="ultralytics",
+        install_cmd=f"{sys.executable} -m pip install --no-deps ultralytics",
+    )
     ensure_python_package(
         "Pillow==9.5.0",
         module_name="PIL",
