@@ -3,9 +3,6 @@ import os
 import subprocess
 import sys
 
-# Prefer Jetson AI Labs package index for aarch64 wheels (can override via env)
-JETSON_PYPI = os.environ.get("JETSON_PYPI_INDEX", "https://pypi.jetson-ai-labs.io")
-
 try:
     from packaging import version as pkg_version
 except Exception:  # pragma: no cover - packaging is part of base images
@@ -19,6 +16,16 @@ except Exception:  # pragma: no cover - pkg_resources is part of setuptools
 # Global list to store failed commands
 failed_commands = []
 
+
+# Packages we must never install/upgrade from this script
+# (leave to the base container):
+_BLOCKED_PIP_PACKAGES = {
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "torchtext",
+    "triton",
+}
 
 def _module_available(module_name):
     return importlib.util.find_spec(module_name) is not None
@@ -52,16 +59,14 @@ def ensure_python_package(pip_name, module_name=None, min_version=None, install_
             print(f"✓ {pip_name} already available (module '{module_name}').")
             return True
 
+    # Never install/upgrade core torch packages here. Keep container's versions.
+    base_pip_name = pip_name.split("[")[0].split("==")[0]
+    if base_pip_name in _BLOCKED_PIP_PACKAGES:
+        print(f"⏭ Skipping install/upgrade for '{pip_name}' (managed by base image).")
+        return True
+
     if install_cmd is None:
-        install_cmd = (
-            f"{sys.executable} -m pip install --prefer-binary --extra-index-url {JETSON_PYPI} {pip_name}"
-        )
-    else:
-        # append Jetson index and prefer-binary to any custom install command
-        install_cmd = (
-            install_cmd
-            + f" --prefer-binary --extra-index-url {JETSON_PYPI}"
-        )
+        install_cmd = f"{sys.executable} -m pip install {pip_name}"
 
     return run_command(install_cmd)
 
@@ -193,7 +198,7 @@ def install_dependencies():
     print("\n--- Ensuring ultralytics and Pillow ---")
     ensure_python_package(
         "ultralytics",
-        module_name="ultralytics",
+        "ultralytics",
         install_cmd=f"{sys.executable} -m pip install --no-deps ultralytics",
     )
     ensure_python_package(
