@@ -1,9 +1,58 @@
+import importlib.util
+import os
 import subprocess
 import sys
-import os
+
+try:
+    from packaging import version as pkg_version
+except Exception:  # pragma: no cover - packaging is part of base images
+    pkg_version = None
+
+try:
+    import pkg_resources
+except Exception:  # pragma: no cover - pkg_resources is part of setuptools
+    pkg_resources = None
 
 # Global list to store failed commands
 failed_commands = []
+
+
+def _module_available(module_name):
+    return importlib.util.find_spec(module_name) is not None
+
+
+def _distribution_version(dist_name):
+    if pkg_resources is None:
+        return None
+    try:
+        return pkg_resources.get_distribution(dist_name).version
+    except Exception:
+        return None
+
+
+def ensure_python_package(pip_name, module_name=None, min_version=None, install_cmd=None):
+    """Verify package availability before installing to avoid overwriting Jetson stacks."""
+    module_name = module_name or pip_name.replace("-", "_")
+    installed = _module_available(module_name)
+
+    if installed:
+        if min_version and pkg_version:
+            current = _distribution_version(pip_name)
+            if current and pkg_version.parse(current) < pkg_version.parse(min_version):
+                print(
+                    f"Found {pip_name}=={current} (<{min_version}); attempting to upgrade conservatively."
+                )
+            else:
+                print(f"✓ {pip_name} already satisfies the requirement.")
+                return True
+        else:
+            print(f"✓ {pip_name} already available (module '{module_name}').")
+            return True
+
+    if install_cmd is None:
+        install_cmd = f"{sys.executable} -m pip install {pip_name}"
+
+    return run_command(install_cmd)
 
 def run_command(command):
     """
@@ -32,60 +81,85 @@ def install_dependencies():
     """
     print("--- Starting dependency installation ---")
 
-    # Install numpy first to satisfy build dependencies for other packages
-    print("\n--- Ensuring numpy is available ---")
-    run_command("python3 -c 'import numpy' || pip install -U numpy")
+    # Verify core runtime (Python, torch, torchvision) already provided by container.
+    print("\n--- Verifying core runtime ---")
+    ensure_python_package("torch", module_name="torch")
+    ensure_python_package("torchvision", module_name="torchvision")
+    ensure_python_package("torchaudio", module_name="torchaudio")
 
-    # Core Python dependencies (excluding numpy as it's already installed)
-    print("\n--- Installing core Python dependencies (remaining) ---")
-    core_packages = [
+    # Core Python dependencies (installed only when missing)
+    print("\n--- Ensuring core Python dependencies ---")
+    for pkg in [
+        ("numpy", "numpy"),
         ("simplejson", "simplejson"),
         ("psutil", "psutil"),
         ("tqdm", "tqdm"),
-        ("yaml", "PyYAML"),
+        ("PyYAML", "yaml"),
         ("iopath", "iopath"),
-        ("cv2", "opencv-python"),
         ("tensorboard", "tensorboard"),
         ("moviepy", "moviepy"),
         ("matplotlib", "matplotlib"),
         ("pandas", "pandas"),
-        ("sklearn", "scikit-learn"),
-        ("av", "av"),
+        ("scikit-learn", "sklearn"),
         ("plotly", "plotly"),
-        ("imutils", "imutils"),
-    ]
-    for import_name, package in core_packages:
-        run_command(f"python3 -c 'import {import_name}' || pip install -U {package}")
+    ]:
+        ensure_python_package(pkg_name := pkg[0], module_name=pkg[1])
 
-    # Install fvcore and fairscale from source
-    print("\n--- Ensuring fairscale is available ---")
-    run_command("python3 -c 'import fairscale' || pip install 'git+https://github.com/facebookresearch/fairscale'")
-
-    print("\n--- Checking torch, torchvision, Cython availability ---")
-    if not run_command("python3 -c 'import torch; import torchvision; import Cython'"):
+    # OpenCV is best provided via apt on Jetson; warn if missing.
+    print("\n--- Checking OpenCV availability ---")
+    if not _module_available("cv2"):
         print(
-            "Warning: torch/torchvision/Cython import failed. Skipping automatic install to avoid overwriting base packages."
+            "⚠ cv2 not found. Please install 'python3-opencv' via apt inside the container if needed."
         )
+    else:
+        print("✓ OpenCV (cv2) detected.")
 
-    print("\n--- Ensuring fvcore is available ---")
-    run_command("python3 -c 'import fvcore' || pip install -U 'git+https://github.com/facebookresearch/fvcore.git'")
+    # Install fairscale / fvcore only if missing.
+    print("\n--- Ensuring fairscale and fvcore ---")
+    ensure_python_package(
+        "git+https://github.com/facebookresearch/fairscale",
+        module_name="fairscale",
+        install_cmd=f"{sys.executable} -m pip install git+https://github.com/facebookresearch/fairscale",
+    )
+    ensure_python_package(
+        "git+https://github.com/facebookresearch/fvcore.git",
+        module_name="fvcore",
+        install_cmd=f"{sys.executable} -m pip install git+https://github.com/facebookresearch/fvcore.git",
+    )
 
-    # Now install cocoapi, numpy is already available
-    print("\n--- Ensuring cocoapi (pycocotools) is available ---")
-    run_command("python3 -c 'import pycocotools' || pip install -U 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'")
+    # Install cocoapi only if pycocotools missing.
+    print("\n--- Ensuring COCO API (pycocotools) ---")
+    ensure_python_package(
+        "git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI",
+        module_name="pycocotools",
+        install_cmd=(
+            f"{sys.executable} -m pip install "
+            "git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI"
+        ),
+    )
 
-    # Uninstall existing torch and install specific version
-    print("\n--- Skipping torch/torchvision reinstall to preserve base image versions ---")
+    # Install detectron2 when requested and missing.
+    print("\n--- Ensuring Detectron2 ---")
+    ensure_python_package(
+        "git+https://github.com/facebookresearch/detectron2@7c2c8fb",
+        module_name="detectron2",
+        install_cmd=(
+            f"{sys.executable} -m pip install "
+            "git+https://github.com/facebookresearch/detectron2@7c2c8fb"
+        ),
+    )
 
-    # Install detectron2
-    print("\n--- Ensuring detectron2 is available ---")
-    run_command("python3 -c 'import detectron2' || pip install git+https://github.com/facebookresearch/detectron2@7c2c8fb")
+    # Install pytorchvideo if missing.
+    print("\n--- Ensuring PyTorchVideo ---")
+    ensure_python_package(
+        "git+https://github.com/facebookresearch/pytorchvideo.git",
+        module_name="pytorchvideo",
+        install_cmd=(
+            f"{sys.executable} -m pip install "
+            "git+https://github.com/facebookresearch/pytorchvideo.git"
+        ),
+    )
 
-    # Install pytorchvideo
-    print("\n--- Ensuring pytorchvideo is available ---")
-    run_command("python3 -c 'import pytorchvideo' || pip install 'git+https://github.com/facebookresearch/pytorchvideo.git'")
-
-    # Set PYTHONPATH (this is a shell export, so for a Python script, it needs to be handled differently or assume
     # the user will set it in their environment before running their main application if needed for slowfast)
     # For a persistent effect within the script's execution context, we can modify os.environ
     print("\n--- Setting PYTHONPATH for slowfast (if applicable) ---")
@@ -105,9 +179,14 @@ def install_dependencies():
 
 
     # Install specific ultralytics and Pillow
-    print("\n--- Ensuring ultralytics and Pillow are available ---")
-    run_command("python3 -c 'import ultralytics' || pip install -U ultralytics")
-    run_command("python3 -c 'import PIL' || pip install Pillow==9.5.0")
+    print("\n--- Ensuring ultralytics and Pillow ---")
+    ensure_python_package("ultralytics", "ultralytics")
+    ensure_python_package(
+        "Pillow==9.5.0",
+        module_name="PIL",
+        min_version="9.5.0",
+        install_cmd=f"{sys.executable} -m pip install Pillow==9.5.0",
+    )
 
     print("\n--- Dependency installation attempt complete ---")
 

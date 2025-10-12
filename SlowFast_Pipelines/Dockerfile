@@ -1,14 +1,17 @@
-# Base JetPack 5 (r35) container with PyTorch 1.13 / Python 3.8
+# Jetson-compatible PyTorch 1.13 / Python 3.8 base (JetPack r35.4.x)
 FROM dustynv/pytorch:1.13-r35.4.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install only additional system utilities needed for notebooks and demos
+# Install core utilities not already provided by the base image
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y \
         build-essential \
+        g++ \
         curl \
+        unzip \
         git \
+        tzdata \
         ninja-build \
         libgl1-mesa-glx \
         libglib2.0-0 \
