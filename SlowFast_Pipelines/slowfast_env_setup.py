@@ -3,6 +3,9 @@ import os
 import subprocess
 import sys
 
+# Prefer Jetson AI Labs package index for aarch64 wheels (can override via env)
+JETSON_PYPI = os.environ.get("JETSON_PYPI_INDEX", "https://pypi.jetson-ai-labs.io")
+
 try:
     from packaging import version as pkg_version
 except Exception:  # pragma: no cover - packaging is part of base images
@@ -50,7 +53,15 @@ def ensure_python_package(pip_name, module_name=None, min_version=None, install_
             return True
 
     if install_cmd is None:
-        install_cmd = f"{sys.executable} -m pip install {pip_name}"
+        install_cmd = (
+            f"{sys.executable} -m pip install --prefer-binary --extra-index-url {JETSON_PYPI} {pip_name}"
+        )
+    else:
+        # append Jetson index and prefer-binary to any custom install command
+        install_cmd = (
+            install_cmd
+            + f" --prefer-binary --extra-index-url {JETSON_PYPI}"
+        )
 
     return run_command(install_cmd)
 
