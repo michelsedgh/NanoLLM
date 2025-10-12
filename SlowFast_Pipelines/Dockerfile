@@ -37,6 +37,3 @@ WORKDIR /workspace
 # Expose port for Jupyter
 EXPOSE 5018
 
-# Run Jupyter Notebook on container start
-CMD ["jupyter", "notebook", "--ip=0.0.0.0", "--port=5018", "--allow-root", "--NotebookApp.token=''", "--NotebookApp.password=''"]
-
