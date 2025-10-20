@@ -76,3 +76,4 @@ checkpoints/
 *.onnx
 *.engine
 *.pkl
+*.pkl.*
